@@ -1,0 +1,40 @@
+# 复制本文件为 inputs.local.yaml 再填。
+# inputs.local.yaml 已在 .gitignore 里，不会进仓库。
+# AI 读这个文件即可开始；留空的项它会主动问你。
+#
+# 提醒：password / api_token / uuid 都是凭据，填在本机就好，别提交、别贴到公开聊天。
+
+vps:
+  ip: ""                  # 被墙那台机器的公网 IP
+  ssh_port: 22
+  auth: "password"        # password | key
+  password: ""
+  key_path: ""
+
+access:
+  # A = 你手上还有别的可用代理，AI 可以经 HTTP CONNECT 直连 SSH
+  # B = 没有代理，只能走商家面板 VNC，由 AI 生成一次性脚本、你粘贴执行
+  mode: "A"
+  proxy_host: "127.0.0.1"
+  proxy_port: 0
+
+cloudflare:
+  # 推荐用 API Token，权限：Zone:Read + DNS:Edit + Zone Settings:Edit
+  # 建 Token：面板 → My Profile → API Tokens → Create Token → Edit zone DNS 模板再补 Zone Settings
+  api_token: ""
+  zone: ""                # 例如 example.com
+  relay_host: ""          # 例如 vps.example.com（必须已在该账号的 zone 里）
+
+relay:
+  node_name: "cf-relay"
+  listen_port: 443
+  ws_path: ""             # 留空 = 自动生成随机路径
+  uuid: ""                # 留空 = 自动生成（不要复用原有节点的 UUID）
+
+client:
+  kind: ""                # clash-verge | clash-party | mihomo-party | sing-box
+  data_dir: ""            # 留空 = 自动探测；便携版通常在安装目录下的 data/
+
+hardening:
+  block_webrtc_udp: false # 仅 Windows，需要管理员权限
+  keep_original_inbound: true   # 强烈建议 true：解封后可直接切回
