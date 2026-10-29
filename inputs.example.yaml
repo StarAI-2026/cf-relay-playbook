@@ -27,11 +27,16 @@ cloudflare:
 
 relay:
   node_name: "cf-relay"
+  # Cloudflare 可回源的 HTTPS 端口只有 443/2053/2083/2087/2096/8443
+  # 443 被原入站占着就换 8443，不要去动原入站
   listen_port: 443
+  server_stack: ""       # sing-box | xray（留空=由 AI 预检探测）
+  original_inbound_port: 0   # 原节点端口；用到就填，便于验收时确认它还在
   ws_path: ""             # 留空 = 自动生成随机路径
   uuid: ""                # 留空 = 自动生成（不要复用原有节点的 UUID）
 
 client:
+  os: ""                 # windows | macos
   kind: ""                # clash-verge | clash-party | mihomo-party | sing-box
   data_dir: ""            # 留空 = 自动探测；便携版通常在安装目录下的 data/
 
