@@ -19,7 +19,8 @@ access:
   proxy_port: 0
 
 cloudflare:
-  # 推荐用 API Token，权限：Zone:Read + DNS:Edit + Zone Settings:Edit
+  # 推荐用 API Token，权限：Zone:Read + DNS:Edit + Zone Settings:Edit + Origin CA:Edit
+  # 没有 Origin CA 权限也不影响，证书那步改成让用户在面板点
   # 建 Token：面板 → My Profile → API Tokens → Create Token → Edit zone DNS 模板再补 Zone Settings
   api_token: ""
   zone: ""                # 例如 example.com

@@ -26,6 +26,8 @@
 | `<CF_TOKEN>` | Cloudflare API Token | 问用户 |
 | `<ZONE_ID>` | 由 Token 查出来，不要问用户 | 你查（§4-P2） |
 | `<CLIENT_DIR>` | 客户端真实数据目录 | 你探测（§4-P4） |
+| `<ORIGINAL_PORT>` | 原节点入站端口（验收要确认它还在） | 问用户或 `ss -lntp` 看 |
+| `<CERT_DIR>` | 证书目录：sing-box 用 `/etc/sing-box/cf`，xray 用 `/usr/local/etc/xray/cf` | 按服务端栈定 |
 
 ---
 
@@ -162,6 +164,21 @@ ss -lntp | grep -E ':(443|8443|2053) '
 | 443 已被原入站占用（常见） | 新入口改用 **8443** 或 **2053**，**不要**动原入站 |
 | 443 被 nginx/caddy 占用 | 保持占用，新入口用 8443，或让用户在 CF 侧用不同主机名分流 |
 
+### P6 — 这个 zone 下还有别的主机名吗
+
+`ssl` 是 **zone 级**设置，改了会连带影响到同一根域名下**所有**橙色云主机名。
+如果别的站点源站用的是自签证书，把它们一起打成 526。
+
+```bash
+curl -s -H "Authorization: Bearer $CF_TOKEN"   "https://api.cloudflare.com/client/v4/zones/$ZONE_ID/dns_records?proxied=true&per_page=100"   | jq -r '.result[] | "\(.type) \(.name) -> \(.content)"'
+```
+
+| 结果 | 做法 |
+|---|---|
+| 只有 `<RELAY_HOST>` 这一条 | 放心用 `strict` |
+| 还有别的主机名 | **先问用户**那些站的源站证书是否有效；不确定就改用 `full`（非 strict），或换一个专用子域名/专用 zone |
+| 用户不清楚 | 用 `full`，并在报告里写明这是一处安全折衷 |
+
 ---
 
 ## 5. 服务器访问：两条路，先判定
@@ -203,7 +220,7 @@ t.connect(username="root", password="<PASSWORD>")
 ```bash
 curl -s -X POST -H "Authorization: Bearer $CF_TOKEN" -H "Content-Type: application/json" \
   "https://api.cloudflare.com/client/v4/zones/$ZONE_ID/dns_records" \
-  -d '{"type":"A","name":"<RELAY_HOST-FQDN>","content":"<VPS_IP>","proxied":true,"ttl":1}' | jq '.success'
+  -d '{"type":"A","name":"<RELAY_HOST>","content":"<VPS_IP>","proxied":true,"ttl":1}' | jq '.success'
 ```
 
 **必须 `proxied: true`（橙色云）。** 灰云 = 直接暴露 IP = 一样被墙。
@@ -224,10 +241,19 @@ curl -s -X POST -H "Authorization: Bearer $CF_TOKEN" -H "Content-Type: applicati
 
 落到服务器：
 
+按服务端栈选目录（**xray 和 sing-box 的证书目录必须和 STEP 4 里 `certificate_path` 指向的一致，否则服务起不来**）：
+
 ```bash
-install -d -m 700 /etc/sing-box/cf
-install -m 600 origin.crt origin.key /etc/sing-box/cf/
-chown -R root:root /etc/sing-box/cf      # 若服务以专用用户运行，改成该用户
+# sing-box
+CERT_DIR=/etc/sing-box/cf
+# xray（改用这一行，注释掉上面那行）
+# CERT_DIR=/usr/local/etc/xray/cf
+
+install -d -m 700 "$CERT_DIR"
+install -m 600 origin.crt origin.key "$CERT_DIR"/
+# 服务若以专用用户运行（如 xray:xray），必须改属主，否则读不到证书
+chown -R root:root "$CERT_DIR"
+echo "$CERT_DIR"    # 记下它，STEP 4 要填进去
 ```
 
 **verify**：`openssl x509 -in /etc/sing-box/cf/origin.crt -noout -subject -dates` 能看到主机名和 15 年有效期。
@@ -235,6 +261,8 @@ chown -R root:root /etc/sing-box/cf      # 若服务以专用用户运行，改�
 ### STEP 3 — SSL 模式设 Full (strict)
 
 **必须在 STEP 2 之后做**，否则回源握手失败，站点会 526。
+
+⚠️ **这是 zone 级设置，会影响同一根域名下所有橙色云主机名。** 先按 §4-P6 确认，再决定用 `strict` 还是 `full`。
 
 ```bash
 curl -s -X PATCH -H "Authorization: Bearer $CF_TOKEN" -H "Content-Type: application/json" \
@@ -287,11 +315,32 @@ systemctl restart sing-box                                          # 多数单�
 
 ```bash
 cp -a /usr/local/etc/xray/config.json /usr/local/etc/xray/config.json.bak-$(date +%F)
-# 用 jq 把上面这段 append 进 .inbounds 数组，不要手改整个文件
-jq --slurpfile nb /tmp/new-inbound.json '.inbounds += $nb' config.json > /tmp/new.json && mv /tmp/new.json config.json
+
+# 1) 先把新入站写成单元素数组文件（下面这段照抄，按需替换占位符）
+cat > /tmp/new-inbound.json <<'JSON'
+[{
+  "port": <PORT>, "protocol": "vless",
+  "settings": { "clients": [{ "id": "<UUID>" }], "decryption": "none" },
+  "streamSettings": {
+    "network": "ws", "security": "tls",
+    "tlsSettings": { "certificates": [{
+      "certificateFile": "<CERT_DIR>/origin.crt",
+      "keyFile": "<CERT_DIR>/origin.key" }] },
+    "wsSettings": { "path": "<WS_PATH>" }
+  },
+  "sniffing": { "enabled": true, "destOverride": ["http", "tls", "quic"] }
+}]
+JSON
+
+# 2) 校验文件确实是合法 JSON 数组，再增量并入
+jq -e 'type == "array"' /tmp/new-inbound.json >/dev/null || { echo "新入站 JSON 不合法，停"; exit 1; }
+jq --slurpfile nb /tmp/new-inbound.json '.inbounds += $nb'    /usr/local/etc/xray/config.json > /tmp/xray-new.json    && mv /tmp/xray-new.json /usr/local/etc/xray/config.json
+
 xray run -test -c /usr/local/etc/xray/config.json
 systemctl restart xray
 ```
+
+> `--slurpfile` 读进来就是数组，所以新入站文件本身要写成 `[...]`，否则会变成嵌套数组、xray 启动报错。
 
 > xray 与 sing-box 的差别：sing-box 模块化可以只加文件；xray 必须改同一个 `config.json`，**务必先备份、再用 `jq` 增量改**。
 
@@ -430,12 +479,12 @@ Windows 便携版若没有外部控制器，可通过命名管道 `\\.\pipe\Miho
 |---|---|---|---|
 | 1 | CF 在代理这个域名 | `dig +short <RELAY_HOST>` | 返回 `104.x`/`172.67.x` 等 CF 段，不是 `<VPS_IP>` |
 | 2 | 回源链路通 | `curl -s https://<RELAY_HOST>/cdn-cgi/trace \| head -3` | 有 `h=<RELAY_HOST>` 字样（CF 在边缘应答，说明橙色云生效） |
-| 3 | 出口是你自己的机器 | `curl -x http://127.0.0.1:7890 -s https://ipinfo.io/json` | `"ip": "<VPS_IP>"` |
+| 3 | 出口是你自己的机器 | `curl -x http://127.0.0.1:<PROXY_PORT> -s https://ipinfo.io/json`（`<PROXY_PORT>` 用 §1-Q2 问到的那个） | `"ip": "<VPS_IP>"` |
 | 4 | 走虚拟网卡也是同一个出口 | `curl -s https://ipinfo.io/json` | `"ip": "<VPS_IP>"` |
 | 5 | 国内是直连 | `curl -o /dev/null -s -w '%{time_total}\n' https://www.baidu.com` | < 0.3 秒 |
 | 6 | WebRTC 不泄露 | 用户在 `https://ip.net.coffee/webrtc` 看，或 STEP 6 的 STUN 自测 | 显示"已禁用或无泄露" / STUN 无响应 |
-| 7 | 重启后能恢复 | 关 TUN → 跑 §STEP 7 脚本 | TUN 回到 true，节点延迟有值 |
-| 8 | 原入站还在 | `ss -lntp \| grep '<原端口>'` | 仍在监听 |
+| 7 | 重启后能恢复 | mihomo：关 TUN → 跑 STEP 7 脚本；<br>Clash Verge：关 TUN → 按 UI 手动 3 步 | TUN 回到 true，节点延迟有值 |
+| 8 | 原入站还在 | `ss -lntp \| grep '<ORIGINAL_PORT>'` | 仍在监听 |
 
 **没有 shell 的情况**（例如你无法操作用户机器）：门 1/2/3/4/5 由你跑；门 6/7/8 让用户截图或粘贴输出，
 并在报告里标明"此项由用户提供"。
