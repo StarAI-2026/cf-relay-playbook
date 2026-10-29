@@ -348,6 +348,50 @@ default-nameserver: [223.5.5.5, 119.29.29.29]   # 仅用于引导解析上面两
 要让解析器也显示国外，得让 `fallback` 的 DoH 查询真正走代理（`respect-rules: true`），
 代价是国内域名解析会绕远，国内 CDN 命中率下降。按需取舍。
 
+### 8.4b 一个害死人的坑：`fallback` 指向国内连不上的 DNS
+
+比明文劫持更阴的一个坑。配置里常见这种写法：
+
+```yaml
+nameserver: [https://dns.alidns.com/dns-query, https://doh.pub/dns-query]
+fallback: [https://dns.google/dns-query, https://cloudflare-dns.com/dns-query, tls://8.8.4.4:853]
+fallback-filter:
+  geoip: true
+  geoip-code: CN
+```
+
+**现象**：某些网站一直转圈、5 秒后超时；换别的网站却完全正常。日志里长这样：
+
+```
+[TCP] dial DIRECT (match GeoSite/cn) --> www.example.com:443 error: dns resolve failed: couldn't find ip
+[TCP] dial DIRECT (match GeoSite/cn) --> www.example.com:443 error: no ip address
+```
+
+打开 debug 日志看 DNS 那几行，真相就出来了：
+
+```
+[DNS] resolve www.example.com A from tls://8.8.4.4:853              ← 连不上
+[DNS] resolve www.example.com A from https://dns.google:443/dns-query   ← 连不上
+[DNS] www.example.com --> [43.160.158.125] A from https://doh.pub:443/dns-query   ← 答案其实回来了
+（但内核还在等那两个永远连不上的 fallback，整体超时，于是判定"解析失败"）
+```
+
+**根因**：`fallback` 里的境外加密 DNS 在国内是连不上的。而 `fallback-filter.geoip` 会给每个答案打上
+"是不是国内 IP"的标记 —— 只要答案的 IP 不在它的 CN 库里（腾讯云 `43.160.x` 这类段它就不认识），
+内核就会丢弃国内 DNS 的正确答案、去等 fallback，然后一起超时。
+
+所以表现为"**只有一部分域名会死**"，非常难查 —— 你换浏览器、换 DNS、重装都没用。
+
+**修法二选一**：
+
+1. **删掉 `fallback` 和 `fallback-filter`**（最简单）。国内域名用国内加密 DNS 解析，境外域名反正由代理端解析，
+   本地根本不需要 fallback。
+2. 保留 fallback，但让它**真的能连上**：设 `respect-rules: true` 并给这些 DoH 域名加代理规则。
+   代价是 DNS 从此依赖代理，代理挂了 DNS 一起挂（可能整机断网）。
+
+**一句话判据**：只要你看到"部分网站超时、其他正常"，先开 debug 日志看 `[DNS]` 行，
+而不是去怀疑浏览器或线路。
+
 ### 8.5 虚拟网卡设置不会自己记住
 
 客户端重启内核后，`tun.enable` 会回到 false。节点选择一般会记住（存在内核的 `cache.db` 里），
